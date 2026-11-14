@@ -1,0 +1,13 @@
+{
+  "KPlugin": {
+    "Id": "org.arche.batterymodes",
+    "Name": "Arche Battery Modes",
+    "Description": "Basculer entre les modes Cockpit et Nomade",
+    "Icon": "battery",
+    "Category": "System Information",
+    "Version": "0.1.0",
+    "License": "MIT"
+  },
+  "KPackageStructure": "Plasma/Applet",
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mode Cockpit (60–80 %)
+Comment=Préserver la batterie : charge entre 60 et 80 %
+Exec=/usr/local/bin/arche-battery-switch cockpit
+Icon=battery
+Terminal=false
+Categories=Settings;System;

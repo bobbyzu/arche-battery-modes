@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mode Nomade (0–100 %)
+Comment=Charge complète pour partir en déplacement
+Exec=/usr/local/bin/arche-battery-switch nomade
+Icon=battery
+Terminal=false
+Categories=Settings;System;

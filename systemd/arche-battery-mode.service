@@ -1,0 +1,29 @@
+[Unit]
+Description=Restore the explicitly saved battery charge mode
+Documentation=file:///usr/local/share/doc/arche-battery-modes/README.md
+# Nothing to do unless the battery exposes thresholds AND a mode was explicitly saved.
+ConditionPathExists=/sys/class/power_supply/BAT0/charge_control_end_threshold
+ConditionPathExists=/var/lib/arche-battery-modes/mode
+After=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/arche-battery-mode restore
+# Hardening. ProtectSystem=strict keeps /sys writable (API file system), which is
+# the only place restore writes to. Do NOT add ProtectKernelTunables: it would make
+# /sys read-only and break the service.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+RestrictAddressFamilies=none
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

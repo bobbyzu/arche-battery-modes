@@ -1,0 +1,45 @@
+#!/bin/sh
+# arche-battery-switch - user-side launcher used by the desktop entries.
+# SPDX-License-Identifier: MIT
+#
+# Runs as the logged-in user (never as root). It asks polkit (pkexec) to run the
+# privileged controller, then re-reads the REAL thresholds without privileges and
+# shows a desktop notification describing what actually happened.
+set -u
+CONTROLLER=/usr/local/sbin/arche-battery-mode   # fixed-path
+
+case "${1:-}" in
+  cockpit) label='Mode Cockpit'; detail='Charge maintenue entre 60 et 80 %' ;;
+  nomade)  label='Mode Nomade';  detail='Charge complète jusqu’à 100 %' ;;
+  *) echo 'Usage: arche-battery-switch {cockpit|nomade}' >&2; exit 2 ;;
+esac
+mode=$1
+
+notify() {
+  # $1 icon, $2 title, $3 body. Falls back to stderr if no notifier is installed.
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send --app-name='Arche Battery Modes' -i "$1" "$2" "$3" || :
+  else
+    printf '%s: %s\n' "$2" "$3" >&2
+  fi
+}
+
+pkexec "$CONTROLLER" "$mode" >/dev/null 2>&1
+rc=$?
+
+# Verify by reading the real thresholds, whatever pkexec reported.
+actual=$("$CONTROLLER" mode 2>/dev/null) || actual=unknown
+
+if [ "$rc" -eq 0 ] && [ "$actual" = "$mode" ]; then
+  notify battery "$label activé" "$detail"
+  exit 0
+fi
+
+case "$rc" in
+  126) reason='Authentification annulée.' ;;
+  127) reason='Autorisation refusée.' ;;
+  0)   reason='Les seuils relus ne correspondent pas au mode demandé.' ;;
+  *)   reason='Le changement de seuils a échoué.' ;;
+esac
+notify dialog-error "$label : non appliqué" "$reason Mode actuel : $actual."
+exit 1

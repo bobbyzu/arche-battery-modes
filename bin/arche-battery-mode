@@ -1,0 +1,164 @@
+#!/bin/sh
+# arche-battery-mode - minimal privileged controller for battery charge thresholds.
+# SPDX-License-Identifier: MIT
+#
+# Security model:
+# - Paths are FIXED. No environment variable can change where this script reads
+#   or writes, even when invoked through sudo -E or a permissive env_keep.
+# - PATH and IFS are reset before anything else.
+# - Only a closed list of arguments is accepted.
+# Consistency model (cockpit/nomade):
+# - The state location is validated and a temporary file created BEFORE any
+#   threshold is written.
+# - If saving the mode still fails after the thresholds changed, the previous
+#   thresholds are written back, so thresholds and saved mode never diverge silently.
+# Lines tagged "fixed-path" are the only ones the test bench rewrites, on a copy.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+IFS='
+'
+umask 077
+
+VERSION=0.2.1
+BATTERY=BAT0                                   # fixed-path
+BASE=/sys/class/power_supply/$BATTERY          # fixed-path
+STATE_DIR=/var/lib/arche-battery-modes         # fixed-path
+STATE=$STATE_DIR/mode
+START=$BASE/charge_control_start_threshold
+END=$BASE/charge_control_end_threshold
+tmp=
+
+err() { printf '%s\n' "arche-battery-mode: $*" >&2; exit 1; }
+warn() { printf '%s\n' "arche-battery-mode: $*" >&2; }
+
+is_number() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# Returns non-zero instead of exiting, so it can be used during rollback.
+try_read() {
+  [ -r "$START" ] && [ -r "$END" ] || return 1
+  cur_start=$(cat "$START") && cur_end=$(cat "$END") || return 1
+  is_number "$cur_start" && is_number "$cur_end"
+}
+read_thresholds() {
+  [ -r "$START" ] && [ -r "$END" ] || err "charge thresholds not supported for $BATTERY"
+  try_read || err 'unexpected threshold values'
+}
+
+targets() {
+  case "$1" in
+    cockpit) target_start=60; target_end=80 ;;
+    nomade)  target_start=0;  target_end=100 ;;
+    *) return 1 ;;
+  esac
+}
+
+current_mode() {
+  read_thresholds
+  for m in cockpit nomade; do
+    targets "$m"
+    if [ "$cur_start" = "$target_start" ] && [ "$cur_end" = "$target_end" ]; then
+      echo "$m"; return 0
+    fi
+  done
+  echo custom
+}
+
+write_threshold() { printf '%s\n' "$2" > "$1"; }
+
+# set_pair START END: writes both thresholds in an order that keeps start < end
+# at every step, based on the values currently in the firmware.
+set_pair() {
+  try_read || return 1
+  if [ "$2" -ge "$cur_end" ]; then
+    write_threshold "$END" "$2" && write_threshold "$START" "$1"
+  else
+    write_threshold "$START" "$1" && write_threshold "$END" "$2"
+  fi
+}
+
+# Puts the previous thresholds back; never exits.
+rollback() { set_pair "$old_start" "$old_end" 2>/dev/null; }
+
+apply() {
+  targets "$1" || err 'unknown mode'
+  read_thresholds
+  old_start=$cur_start; old_end=$cur_end
+  [ -w "$START" ] && [ -w "$END" ] || err 'administrator privileges are required'
+  if ! set_pair "$target_start" "$target_end" 2>/dev/null; then
+    rollback || :
+    err 'unable to update charge thresholds (previous values restored if possible)'
+  fi
+  try_read || { rollback || :; err 'unable to read thresholds back'; }
+  if [ "$cur_start" != "$target_start" ] || [ "$cur_end" != "$target_end" ]; then
+    got="$cur_start-$cur_end"
+    rollback || :
+    err "firmware did not retain requested values (read back $got); previous values restored if possible"
+  fi
+}
+
+# Validates the state location and creates the temporary file. No threshold
+# has been touched yet when this runs, so any failure here changes nothing.
+prepare_state() {
+  [ ! -L "$STATE_DIR" ] || err 'refusing symlinked state directory; nothing changed'
+  if [ ! -d "$STATE_DIR" ]; then
+    mkdir -m 700 "$STATE_DIR" 2>/dev/null || err 'cannot create state directory; nothing changed'
+  fi
+  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+    [ -f "$STATE" ] && [ ! -L "$STATE" ] || err 'state file is not a regular file; nothing changed'
+  fi
+  tmp=$(mktemp "$STATE_DIR/.mode.XXXXXXXX" 2>/dev/null) || err 'state directory is not writable; nothing changed'
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+}
+
+commit_state() {
+  printf '%s\n' "$1" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$STATE"
+}
+
+require_root() { [ "$(id -u)" -eq 0 ] || err 'administrator authorization required'; }
+
+case "${1:-}" in
+  status)
+    read_thresholds
+    printf 'Battery: %s; thresholds: %s-%s%%; active mode: %s\n' "$BATTERY" "$cur_start" "$cur_end" "$(current_mode)"
+    ;;
+  mode)
+    current_mode
+    ;;
+  cockpit|nomade)
+    require_root
+    prepare_state
+    apply "$1"
+    if ! commit_state "$1" 2>/dev/null; then
+      if rollback; then
+        err "could not save the mode; previous thresholds ($old_start-$old_end) restored"
+      fi
+      err 'could not save the mode AND could not restore previous thresholds; check with: arche-battery-mode status'
+    fi
+    trap - EXIT HUP INT TERM
+    printf 'Active mode: %s\n' "$1"
+    ;;
+  restore)
+    require_root
+    if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+      echo 'No saved mode; thresholds left unchanged.'
+      exit 0
+    fi
+    [ -f "$STATE" ] && [ ! -L "$STATE" ] || err 'state file is not a regular file; nothing changed'
+    mode=
+    IFS= read -r mode < "$STATE" || :
+    if ! targets "$mode" 2>/dev/null; then
+      warn 'saved mode is empty or invalid; thresholds left unchanged'
+      exit 0
+    fi
+    apply "$mode"
+    printf 'Restored mode: %s\n' "$mode"
+    ;;
+  version)
+    echo "$VERSION"
+    ;;
+  *)
+    printf 'Usage: arche-battery-mode {status|mode|cockpit|nomade|restore|version}\n' >&2
+    exit 2
+    ;;
+esac
